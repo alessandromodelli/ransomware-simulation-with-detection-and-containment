@@ -3,27 +3,25 @@ from google.cloud import compute_v1
 import json
 from datetime import datetime
 
-
 def firewall_automation(request):
     """
     Rileva potenziali data exfiltration e blocca automaticamente il traffico
     creando/aggiornando regole firewall
     """
     try:
-        # Inizializza i client
+        # Initialize clients
         bq_client = bigquery.Client()
         firewall_client = compute_v1.FirewallsClient()
         instance_client = compute_v1.InstancesClient()
         
         project_id = "gruppo1-russo"
         
-        # Query di rilevamento data exfiltration
+        # Detection query
         query = """
         -- PARAMETRI
         DECLARE WINDOW_MINUTES INT64 DEFAULT 1;
         DECLARE MIN_EVENTS INT64 DEFAULT 5;
         DECLARE MIN_BYTES_PER_EVENT INT64 DEFAULT 25 * 1024;  -- 25 KB
-
         WITH rs_logs_flat AS(
         SELECT
         timestamp,
@@ -93,11 +91,11 @@ def firewall_automation(request):
         ORDER BY time_window DESC;
         """
         
-        # Esegui la query
+        # Execute query
         query_job = bq_client.query(query)
         results = query_job.result()
         
-        # Analizza i risultati e crea regole firewall
+        # Analyze results and apply measures
         suspicious_vms = []
         actions_taken = []
 
@@ -114,11 +112,11 @@ def firewall_automation(request):
             }
             suspicious_vms.append(vm_info)
             
-            # Crea una regola firewall per bloccare il traffico dalla VM sospetta
+            # Create firewall rule to block suspicious VM 
             firewall_rule_name = f"block-exfiltration-{row.src_vm.replace('_', '-')}"
             
             try:
-                # Verifica se la regola esiste già
+                # Verify existance
                 try:
                     existing_rule = firewall_client.get(
                         project=project_id,
@@ -126,7 +124,7 @@ def firewall_automation(request):
                     )
                     action = f"Regola '{firewall_rule_name}' già esistente, non modificata"
                 except Exception:
-                    # La regola non esiste, creala
+                    # Create rule
                     firewall_rule = compute_v1.Firewall()
                     firewall_rule.name = firewall_rule_name
                     firewall_rule.network = (
@@ -136,7 +134,7 @@ def firewall_automation(request):
                     firewall_rule.priority = 1000
                     firewall_rule.disabled = False
                     
-                    # Blocca traffico in uscita dalla VM verso la destinazione
+                    # Block egress traffic toward destination
                     firewall_rule.denied = [
                         compute_v1.Denied(
                             I_p_protocol="tcp",
@@ -144,22 +142,25 @@ def firewall_automation(request):
                         )
                     ]
                     
-                    # Target: VM sorgente (quella che sta esfiltrando dati)
+                    # Target: Source VM
                     firewall_rule.target_tags = [row.src_vm]
                     
-                    # Destinazione: qualsiasi IP o specifico se disponibile
+                    # Every destination
                     firewall_rule.destination_ranges = ["0.0.0.0/0"]
                     
                     firewall_rule.description = (
                         f"AUTO-GENERATED: Blocco data exfiltration rilevata - {row.event_count} eventi rilevati"
                     )
                     
-                    # Crea la regola
-                    firewall_client.insert(
+                    # Create rule
+                    operation = firewall_client.insert(
                         project=project_id,
                         firewall_resource=firewall_rule
                     )
-                
+                    
+                    # Wait for completion
+                    # operation.result(timeout=30)
+                    
                     action = f"✓ Creata regola '{firewall_rule_name}' per bloccare {row.src_vm}"
                 
                 actions_taken.append(action)
@@ -168,8 +169,8 @@ def firewall_automation(request):
                 actions_taken.append(f"✗ Errore creazione regola per {row.src_vm}: {str(fw_error)}")
 
             try: 
-                #Spegni la vm sospetta
-                instance_client.stop(
+                #Shutdown vm
+                operation = instance_client.stop(
                     project=project_id,
                     zone="europe-west8-b",
                     instance=row.src_vm
@@ -183,7 +184,7 @@ def firewall_automation(request):
             except Exception as vm_error:
                 instances_actions_taken.append(f"✗ Errore spegnimento VM {row.src_vm}: {str(vm_error)}")
         
-        # Prepara la risposta
+        # Response
         response = {
             "status": "success",
             "timestamp": datetime.utcnow().isoformat(),
